@@ -142,13 +142,29 @@ func (a *analyzer) ProviderStart() error {
 		Total:   len(a.providers),
 	})
 	abConfigChan := make(chan []provider.InitConfig)
-	providerInitCtx, cancelFunc := context.WithCancel(a.ctx)
+
+	// providerInitCtx governs how long we wait for init to finish, not the
+	// provider lifetime. Providers receive a.ctx so they outlive the init phase.
+    var providerInitCtx context.Context
+    var cancelFunc context.CancelFunc
+    // Timeout semantics: nil = 8 min default, 0 = no timeout, >0 = custom.
+    timeout := 8 * time.Minute
+    if a.providerInitTimeout != nil {
+      timeout = *a.providerInitTimeout
+    }
+    if timeout == 0 {
+      providerInitCtx, cancelFunc = context.WithCancel(a.ctx)
+    } else {
+      providerInitCtx, cancelFunc = context.WithTimeout(a.ctx, timeout)
+    }
+
 	waitGroup := sync.WaitGroup{}
 	go func() {
 		for {
 			select {
 			case config := <-abConfigChan:
 				additionalBuiltinConfigs = append(additionalBuiltinConfigs, config...)
+				waitGroup.Done()
 			case <-providerInitCtx.Done():
 				return
 			}
@@ -165,6 +181,12 @@ func (a *analyzer) ProviderStart() error {
 			waitGroup.Add(1)
 			go func() {
 				a.log.Info("provider init", "provider", pv.Name)
+				// Intentionally passing in "a.ctx" to ProviderInit() and not providerInitCtx
+				// providerInitCtx bounds how long we wait for all providers to initialize.
+				// This is intentionally separate from a.ctx, which is passed to ProviderInit
+				// itself, because providers (e.g., the Java provider) hold onto their init
+				// context for the lifetime of the language server process. Using
+				// providerInitCtx there would kill providers as soon as init completes.		
 				additionalBuiltins, err := pv.provider.ProviderInit(a.ctx, nil)
 				if err != nil {
 					a.log.Error(err, "unable to init provider")
@@ -178,11 +200,7 @@ func (a *analyzer) ProviderStart() error {
 					Current: i + 1,
 					Total:   len(a.providers),
 				})
-				select {
-				case abConfigChan <- additionalBuiltins:
-				case <-providerInitCtx.Done():
-				}
-				waitGroup.Done()
+				abConfigChan <- additionalBuiltins
 			}()
 		}
 	}
@@ -193,38 +211,17 @@ func (a *analyzer) ProviderStart() error {
 		close(c)
 	}()
 
-	// Determine timeout: nil = default 8 min, 0 = no timeout
-	timeout := 8 * time.Minute
-	noTimeout := false
-	if a.providerInitTimeout != nil {
-		if *a.providerInitTimeout == 0 {
-			noTimeout = true
-		} else {
-			timeout = *a.providerInitTimeout
-		}
-	}
-
-	if noTimeout {
-		select {
-		case <-c:
-			a.log.V(3).Info("started all non builtin providers")
-		case <-a.ctx.Done():
-			cancelFunc()
-			return fmt.Errorf("provider init cancelled: %w", a.ctx.Err())
-		}
-	} else {
-		select {
-		case <-c:
-			a.log.V(3).Info("started all non builtin providers")
-		case <-a.ctx.Done():
-			cancelFunc()
-			return fmt.Errorf("provider init cancelled: %w", a.ctx.Err())
-		case <-time.After(timeout):
-			cancelFunc()
+	select {
+	  case <-c:
+		a.log.V(3).Info("started all non builtin providers")
+	  case <-providerInitCtx.Done():
+		cancelFunc()
+		if errors.Is(providerInitCtx.Err(), context.DeadlineExceeded) {
 			return fmt.Errorf("timed out starting providers after %s", timeout)
 		}
+		return fmt.Errorf("context cancelled while starting providers: %w", providerInitCtx.Err())
 	}
-	cancelFunc()
+	cancelFunc() 
 
 	// Init builtins
 	if builtinProvider != nil {

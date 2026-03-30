@@ -107,6 +107,7 @@ func NewAnalyzer(options ...AnalyzerOption) (Analyzer, error) {
 		ctx = context.Background()
 	}
 	ctx, cancelFunc := context.WithCancel(ctx)
+
 	for _, config := range finalConfigs {
 		if opts.analysisMode != "" {
 			for i := range config.InitConfig {
@@ -114,7 +115,7 @@ func NewAnalyzer(options ...AnalyzerOption) (Analyzer, error) {
 			}
 		}
 
-		prov, err := lib.GetProviderClient(ctx, config, log, opts.progress)
+		prov, err := lib.GetProviderClient(config, log, opts.progress)
 		if err != nil {
 			providerErrors = append(providerErrors, err)
 			continue

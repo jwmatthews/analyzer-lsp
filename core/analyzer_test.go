@@ -1,7 +1,9 @@
 package core
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/konveyor/analyzer-lsp/engine"
@@ -239,4 +241,110 @@ func TestAnalyzer_ParseRules_UsesExplicitPaths(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "expected rules from explicit path (tag-001), not from struct path (file-001)")
+}
+
+// newTestAnalyzerForProviderStart creates an analyzer with the given providers
+// and timeout, suitable for testing ProviderStart behavior.
+func newTestAnalyzerForProviderStart(t *testing.T, providers []Provider, timeout *time.Duration) *analyzer {
+	t.Helper()
+	prog, err := progress.New()
+	require.NoError(t, err)
+
+	return &analyzer{
+		log:                 logr.Discard(),
+		ctx:                 context.Background(),
+		providers:           providers,
+		allConfigProviders:  map[string]provider.InternalProviderClient{"test": &mockProviderClient{}},
+		collector:           &mockReporter{},
+		progress:            prog,
+		providerInitTimeout: timeout,
+	}
+}
+
+func TestProviderStart_FastProvider_CompletesBeforeTimeout(t *testing.T) {
+	timeout := 5 * time.Second
+	a := newTestAnalyzerForProviderStart(t, []Provider{
+		{Name: "fast-provider", provider: &mockProviderClient{}},
+	}, &timeout)
+
+	start := time.Now()
+	err := a.ProviderStart()
+	elapsed := time.Since(start)
+
+	assert.NoError(t, err)
+	assert.Less(t, elapsed, 2*time.Second, "fast provider should complete well before timeout")
+}
+
+func TestProviderStart_SlowProvider_TimesOut(t *testing.T) {
+	timeout := 200 * time.Millisecond
+	a := newTestAnalyzerForProviderStart(t, []Provider{
+		{Name: "slow-provider", provider: &mockProviderClient{initDelay: 10 * time.Second}},
+	}, &timeout)
+
+	start := time.Now()
+	err := a.ProviderStart()
+	elapsed := time.Since(start)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "timed out")
+	assert.InDelta(t, timeout.Seconds(), elapsed.Seconds(), 0.2,
+		"should return close to the timeout duration, not wait for provider to finish")
+}
+
+func TestProviderStart_ContextCancelled_ReturnsPromptly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	timeout := 5 * time.Minute
+	prog, err := progress.New()
+	require.NoError(t, err)
+
+	a := &analyzer{
+		log:                 logr.Discard(),
+		ctx:                 ctx,
+		providers:           []Provider{{Name: "slow-provider", provider: &mockProviderClient{initDelay: 10 * time.Second}}},
+		allConfigProviders:  map[string]provider.InternalProviderClient{"test": &mockProviderClient{}},
+		collector:           &mockReporter{},
+		progress:            prog,
+		providerInitTimeout: &timeout,
+	}
+
+	// Cancel the context after a short delay
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	err = a.ProviderStart()
+	elapsed := time.Since(start)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "cancelled")
+	assert.Less(t, elapsed, 2*time.Second, "should return promptly after cancellation, not wait for provider")
+}
+
+func TestProviderStart_NoTimeout_WaitsForCompletion(t *testing.T) {
+	zeroTimeout := time.Duration(0)
+	delay := 300 * time.Millisecond
+	a := newTestAnalyzerForProviderStart(t, []Provider{
+		{Name: "medium-provider", provider: &mockProviderClient{initDelay: delay}},
+	}, &zeroTimeout)
+
+	start := time.Now()
+	err := a.ProviderStart()
+	elapsed := time.Since(start)
+
+	assert.NoError(t, err)
+	assert.GreaterOrEqual(t, elapsed, delay, "with zero timeout (no timeout), should wait for provider to finish")
+}
+
+func TestProviderStart_NilTimeout_DoesNotFailWithDefault(t *testing.T) {
+	// Smoke test: when providerInitTimeout is nil, ProviderStart uses a default
+	// timeout and does not fail or immediately expire.
+
+	a := newTestAnalyzerForProviderStart(t, []Provider{
+		{Name: "fast-provider", provider: &mockProviderClient{}},
+	}, nil) // nil = default 8 min timeout
+
+	err := a.ProviderStart()
+	assert.NoError(t, err, "fast provider with default timeout should succeed")
 }

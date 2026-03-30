@@ -11,7 +11,11 @@ import (
 )
 
 // We need some wrapper that can deal with out of tree providers, this will be a call, that will mock it out, but go against in tree.
-func GetProviderClient(ctx context.Context, config provider.Config, log logr.Logger, progress *progress.Progress) (provider.InternalProviderClient, error) {
+func GetProviderClient(config provider.Config, log logr.Logger, progress *progress.Progress) (provider.InternalProviderClient, error) {
+	return GetProviderClientWithContext(context.Background(), config, log, progress)
+}
+
+func GetProviderClientWithContext(ctx context.Context, config provider.Config, log logr.Logger, progress *progress.Progress) (provider.InternalProviderClient, error) {
 	switch config.Name {
 	case "builtin":
 		return builtin.NewBuiltinProvider(config, log, progress), nil

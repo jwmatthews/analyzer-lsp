@@ -286,7 +286,7 @@ func (r *ruleEngine) RunRulesScopedWithOptions(ctx context.Context, ruleSets []R
 	ruleContext := r.runTaggingRules(ctx, taggingRules, mapRuleSets, conditionContext, scopes, cfg)
 
 	// Need a better name for this thing
-	ret := make(chan response, len(otherRules))
+	ret := make(chan response)
 
 	ranRules := len(taggingRules)
 	var matchedRules int32
@@ -352,6 +352,8 @@ func (r *ruleEngine) RunRulesScopedWithOptions(ctx context.Context, ruleSets []R
 		}
 	}()
 
+	dispatched := 0
+dispatchOtherRules:
 	for _, rule := range otherRules {
 		newContext := ruleContext.Copy()
 		newContext.RuleID = rule.rule.RuleID
@@ -362,13 +364,16 @@ func (r *ruleEngine) RunRulesScopedWithOptions(ctx context.Context, ruleSets []R
 		rule.carrier = carrier
 		select {
 		case r.ruleProcessing <- rule:
+			dispatched++
 		case <-ctx.Done():
-			wg.Done()
-			goto dispatchDone
+			wg.Done() // undo the Add — rule was never dispatched
+			r.logger.V(1).Info("cancellation received, not all rules were dispatched",
+				"dispatched", dispatched, "total", len(otherRules))
+			break dispatchOtherRules
 		}
 	}
-dispatchDone:
-	r.logger.V(5).Info("All rules added buffer, waiting for engine to complete", "size", len(otherRules))
+	r.logger.V(5).Info("dispatch complete, waiting for engine to finish",
+		"dispatched", dispatched, "total", len(otherRules))
 
 	done := make(chan struct{})
 	go func() {

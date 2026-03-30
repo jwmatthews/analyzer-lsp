@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/konveyor/analyzer-lsp/engine"
@@ -15,6 +16,7 @@ import (
 type mockProviderClient struct {
 	capabilities       []provider.Capability
 	initError          error
+	initDelay          time.Duration
 	startError         error
 	prepareError       error
 	stopCalled         bool
@@ -38,6 +40,13 @@ func (m *mockProviderClient) Init(ctx context.Context, log logr.Logger, config p
 }
 
 func (m *mockProviderClient) ProviderInit(ctx context.Context, additionalBuiltins []provider.InitConfig) ([]provider.InitConfig, error) {
+	if m.initDelay > 0 {
+		select {
+		case <-time.After(m.initDelay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if m.initError != nil {
 		return nil, m.initError
 	}
